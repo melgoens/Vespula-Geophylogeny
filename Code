@@ -1,0 +1,220 @@
+### Main Question: Do similar species clusters of the Vespula genus live in the same geographical area?
+ Workflow: Find two species that are close together using the clusters in the heatmap then use the coordinates on the world map to determine if the sister species live in the same geographical area.
+
+## Introduction: 
+
+## Loading Packages, Data, and Creating Functions
+```{r Loading Packages, echo=TRUE}
+library(plyr)
+library(dplyr)
+library(readr)
+library(ape)
+library(Biostrings)
+library(tidyverse)
+library(DECIPHER)
+library(ggmap)
+library(phytools)
+library(RColorBrewer)
+library(mapproj)
+```
+
+```{r GetInfo Function, echo=TRUE}
+GetInfo <- function(x) {
+  Summary <- summary(x)
+  Unique <- unique(x)
+  Na <- sum(is.na(x))
+  Dimensions <- dim(x)
+  
+  result <- list(Summary, Unique, Na, Dimensions)
+  names(result) <- c("Summary of Data", "Unique Values", "Number of NA values present", "Table Dimensions")
+  
+  return(result)
+}
+```
+
+```{r Loading and Cleaning Up Vespula Data, echo=TRUE}
+VespulaData <- read_tsv(file = "Vespula.txt")
+
+VespulaData <- VespulaData %>%
+  filter(!is.na(species_name)) %>%
+  filter(!is.na(nucleotides))
+
+GetInfo(VespulaData)
+```
+
+## Clustering of Phylogenetics
+```{r Setting Parameters, echo=TRUE}
+missing.data <- 0.02
+length.var <- 40
+chosen.model <- "TN93"
+clustering.threshold <- 0.05
+clustering.method <- "single"
+```
+
+```{r Filtering Data, echo=TRUE}
+VespulaNuc <- VespulaData %>%
+  dplyr::select(nucleotides, species_name, lat, lon, processid) %>%
+  mutate(nucleotides2 = str_remove_all(nucleotides, "^N+|N+$|-")) %>%
+  filter(!is.na(species_name)) %>%
+  filter(!is.na(nucleotides2)) %>%
+  filter(str_count(nucleotides2, "N") <= (missing.data * str_count(nucleotides2))) %>%
+  filter(str_count(nucleotides2) >= median(str_count(nucleotides2)) - length.var & str_count(nucleotides2) <= median(str_count(nucleotides2)) + length.var)
+
+GetInfo(VespulaNuc)
+
+rm(length.var)
+
+#Need to make this smaller than 671 - Sample from each species - 14
+VespulaSm <- VespulaNuc %>%
+  group_by(species_name) %>%
+  sample_n(1) %>%
+  ungroup()
+```
+
+```{r P Distance Matrix, echo=TRUE}
+Stringset <- DNAStringSet(VespulaSm$nucleotides2)
+names(Stringset) <- VespulaSm$species_name
+
+AlignedStringset <- DNAStringSet(muscle::muscle(Stringset))
+BrowseSeqs(AlignedStringset)
+AlignedStringset <- as.DNAbin(AlignedStringset)
+class(AlignedStringset)
+
+distanceMatrix <- dist.dna(AlignedStringset, model = chosen.model, as.matrix = TRUE, pairwise.deletion = TRUE)
+```
+
+```{r Clustering, echo = TRUE}
+VespulaClusters <- IdClusters(distanceMatrix, method = clustering.method, cutoff = clustering.threshold, showPlot = FALSE, type = "both", verbose = TRUE)
+
+GetInfo(VespulaClusters)
+
+```
+
+```{r Reconstructed Evolution using Phylo Heatmap (Traitgram), echo=TRUE}
+#Convert from Class Dendrogram to Cass Phylol
+dist <- as.dist(AlignedStringset)
+DNA.hc <- hclust(dist, method = "average")
+VespulaClustersP <- as.phylo(DNA.hc)
+VespTree <- phytools::force.ultrametric(VespulaClustersP)
+Ntip(VespTree)
+
+#Putting Lon and Lat into a Matrix
+VespM <- as.matrix(cbind(VespulaSm$lat, VespulaSm$lon))
+rownames(VespM) <- VespulaSm$species_name
+colnames(VespM) <- c("lat", "long")
+dim(VespM)
+class(VespM)
+
+#Actually, I want to use Nucleotides instead of location - I'll use location for my map
+#Making a data.frame with %G, %C, %T, %A
+VespulaSm$number.of.G <- str_count(VespulaSm$nucleotides2, "G")
+VespulaSm$number.of.C <- str_count(VespulaSm$nucleotides2, "C")
+VespulaSm$number.of.A <- str_count(VespulaSm$nucleotides2, "A")
+VespulaSm$number.of.T <- str_count(VespulaSm$nucleotides2, "T")
+
+names(VespulaSm)[names(VespulaSm) == "number.of.G"] <- "G"
+names(VespulaSm)[names(VespulaSm) == "number.of.C"] <- "C"
+names(VespulaSm)[names(VespulaSm) == "number.of.A"] <- "A"
+names(VespulaSm)[names(VespulaSm) == "number.of.T"] <- "T"
+
+VespBaseContent <- VespulaSm %>%
+  dplyr::select(A, C, G, T)
+VespBaseContent <- as.matrix(sapply(VespBaseContent, as.numeric)) 
+SpeciesNames <- VespulaSm$species_name
+rownames(VespBaseContent) <- SpeciesNames
+
+dim(VespBaseContent)
+class(VespBaseContent)
+all.equal(VespTree$tip.label, rownames(VespBaseContent))
+print(VespTree$tip.label)
+print(rownames(VespBaseContent))
+
+phylo.heatmap(VespTree,VespBaseContent, standardize=TRUE)
+
+rm(Stringset)
+rm(AlignedStringset)
+rm(distanceMatrix)
+rm(dist)
+rm(DNA.hc)
+rm(VespulaClusters)
+rm(VespulaClustersP)
+rm(VespM)
+rm(VespBaseContent)
+rm(VespTree)
+rm(SpeciesNames)
+```
+
+```{r Frequency of Vespula Species using Pie Chart, echo=TRUE}
+VespulaDist <- VespulaNuc %>%
+  group_by(species_name) %>%
+  count(species_name)
+
+slices <- VespulaDist$n
+lbls <- VespulaDist$species_name
+pct <- round(slices/sum(slices)*100)
+lbls <- paste(lbls, pct)
+lbls <- paste(lbls,"%",sep="")
+pie(slices, labels = lbls, cex = 0.75, radius = 1, main ="Frequency of Vespula Species")
+
+rm(VespulaDist)
+rm(lbls)
+rm(pct)
+rm(slices)
+```
+
+```{r Mapping Species Clusters, echo=TRUE}
+
+#Making a Large Tree that incorporates all data
+StringsetLrg <- DNAStringSet(VespulaNuc$nucleotides2)
+names(StringsetLrg) <- VespulaNuc$species_name
+
+AlignedStringsetLrg <- DNAStringSet(muscle::muscle(StringsetLrg))
+BrowseSeqs(AlignedStringsetLrg)
+AlignedStringsetLrg <- as.DNAbin(AlignedStringsetLrg)
+class(AlignedStringsetLrg)
+
+distanceMatrixLrg <- dist.dna(AlignedStringsetLrg, model = chosen.model, as.matrix = TRUE, pairwise.deletion = TRUE)
+
+VespulaClustersLrg <- IdClusters(distanceMatrixLrg, method = clustering.method, cutoff = clustering.threshold, showPlot = FALSE, type = "both", verbose = TRUE)
+
+distLrg <- as.dist(AlignedStringsetLrg)
+DNA.hcLrg <- hclust(distLrg, method = "average")
+VespulaClustersPLrg <- as.phylo(DNA.hcLrg)
+VespTreeLrg <- phytools::force.ultrametric(VespulaClustersPLrg)
+Ntip(VespTreeLrg)
+
+rm(StringsetLrg)
+rm(AlignedStringsetLrg)
+rm(distanceMatrixLrg)
+rm(distLrg)
+rm(DNA.hcLrg)
+rm(VespulaClustersLrg)
+rm(VespulaClustersPLrg)
+
+#Making the map
+lat <- VespulaNuc$lat
+lon <- VespulaNuc$lon
+taxa <- VespTreeLrg$tip.label
+geo <- matrix(data = c(lat, lon), nrow = 612, dimnames = list(taxa, c("lat", "lon")))#########not working
+obj <- phytools::phylo.to.map(tree = VespTreeLrg, coords = geo, rotate = TRUE, type = "phylogram", fsize = 0.7)
+
+phytools::plot.phylo.to.map(obj, rotate = TRUE, type = "phylogram", fsize = 0.7)
+
+rm(chosen.model)
+rm(clustering.method)
+rm(clustering.threshold)
+rm(missing.data)
+rm(VespTreeLrg)
+rm(VespulaClustersLrg)
+rm(lat)
+rm(lon)
+rm(geo)
+rm(taxa)
+```
+
+```{r Histogram of Latitude and Longitudinal Populations, echo = TRUE}
+hist(VespulaData$lat) #40 to 50
+hist(VespulaData$lon) #-100 to -50 and 0 to 20
+```
+
+## End of Assignment 5
